@@ -1,4 +1,4 @@
-// main.cpp (최종본: 라인 + ArUco 동시, 라인 안정화(컨투어 선택+EMA) + PD 제어 + ArUco 히스테리시스 + ROI 디버그 창 보기좋게 고정)
+c// main.cpp (최종본: 라인 + ArUco 동시, 라인 안정화(컨투어 선택+EMA) + PD 제어 + ArUco 히스테리시스 + ROI 디버그 창 보기좋게 고정)
 //
 // Build:
 // g++ -std=c++17 -O2 main.cpp -o run `pkg-config --cflags --libs opencv4`
