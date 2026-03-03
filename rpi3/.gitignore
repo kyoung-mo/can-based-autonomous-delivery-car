@@ -1,0 +1,33 @@
+# =========================
+# Database
+# =========================
+database/*.db
+database/*.sqlite
+database/*.sqlite3
+
+# =========================
+# Build outputs (executables)
+# =========================
+server/delivery_server
+server/delivery_server_test
+
+# =========================
+# Object files
+# =========================
+*.o
+*.out
+
+# =========================
+# CMake / Build directories (혹시 사용 시)
+# =========================
+build/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+
+# =========================
+# OS generated files
+# =========================
+.DS_Store
+Thumbs.db
