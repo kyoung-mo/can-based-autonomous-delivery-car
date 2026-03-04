@@ -1,0 +1,2 @@
+set(__QT_DEPLOY_TARGET_delivery_client_FILE /home/pi/catnip_client/delivery_client/build/Desktop-Debug/delivery_client)
+set(__QT_DEPLOY_TARGET_delivery_client_TYPE EXECUTABLE)

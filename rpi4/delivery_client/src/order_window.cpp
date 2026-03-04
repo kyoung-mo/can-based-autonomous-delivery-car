@@ -9,18 +9,81 @@
 #include <QLineEdit>
 #include <QJsonObject>
 #include <QJsonArray>
+#include <QJsonDocument>
+#include <QFile>
 #include <QDebug>
 #include <QFont>
 #include <QStyle>
 #include <QApplication>
+#include <QStandardPaths>
+#include <QTimer>
+#include <thread>  // ✅ 추가: 스레드 사용
 
 // Qt6 네임스페이스 추가
 using namespace Qt::Literals::StringLiterals;
 
-OrderWindow::OrderWindow(QWidget* parent)
-    : QMainWindow(parent),
-      m_mqtt_client(std::make_unique<MQTTClient>("127.0.0.1:1883"_L1, this)) {
+// ✅ 설정 파일 로드 헬퍼 함수
+QString load_config_value(const QString& key, const QString& default_value) {
+    QString config_path = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    QString config_file_path = config_path + "/config.json";
     
+    // config.json이 없으면 현재 디렉토리에서 찾기
+    QFile config_file(config_file_path);
+    if (!config_file.exists()) {
+        config_file.setFileName("config.json");
+    }
+    
+    if (config_file.open(QIODevice::ReadOnly)) {
+        QJsonDocument doc = QJsonDocument::fromJson(config_file.readAll());
+        QJsonObject obj = doc.object();
+        config_file.close();
+        
+        // key는 dot notation 형식 (예: "mqtt.broker_host")
+        QStringList keys = key.split(".");
+        QJsonValue value = obj;
+        
+        for (const QString& k : keys) {
+            if (value.isObject()) {
+                value = value.toObject()[k];
+            } else {
+                return default_value;
+            }
+        }
+        
+        if (value.isString()) {
+            return value.toString();
+        }
+    }
+    
+    return default_value;
+}
+
+// ==================== OrderWindow 생성자 ====================
+
+OrderWindow::OrderWindow(QWidget* parent)
+    : QMainWindow(parent) {
+    
+    // ✅ config.json에서 MQTT 설정 로드
+    QString broker_host = load_config_value(u"mqtt.broker_host"_s, u"10.42.0.1"_s);
+    QString broker_port = load_config_value(u"mqtt.broker_port"_s, u"1883"_s);
+    QString username = load_config_value(u"mqtt.username"_s, u"hoji"_s);
+    QString password = load_config_value(u"mqtt.password"_s, u"1234"_s);
+    
+    // 브로커 주소 생성
+    QString broker_address = QString(u"%1:%2"_s).arg(broker_host, broker_port);
+    
+    // ✅ 개선된 MQTT 클라이언트 생성 (인증 정보 포함)
+    m_mqtt_client = std::make_unique<MQTTClient>(
+        broker_address,  // 10.42.0.1:1883
+        username,        // hoji
+        password,        // 1234
+        this);
+    
+    qDebug() << "✓ MQTT 클라이언트 생성됨";
+    qDebug() << "  브로커:" << broker_host << ":" << broker_port;
+    qDebug() << "  사용자명:" << username;
+    
+    // 윈도우 설정
     setWindowTitle(u"배달 주문 시스템 - RPi4 클라이언트"_s);
     setGeometry(100, 100, 600, 900);
     
@@ -39,9 +102,15 @@ OrderWindow::OrderWindow(QWidget* parent)
     // 연결 설정
     create_connections();
     
-    // MQTT 연결
-    m_mqtt_client->connect();
+    // ✅ 지연된 연결 (윈도우 표시 후 MQTT 연결)
+    QTimer::singleShot(500, [this]() {
+        m_mqtt_client->connect();
+    });
+    
+    qDebug() << "✓ OrderWindow 초기화 완료";
 }
+
+// ==================== UI 초기화 ====================
 
 void OrderWindow::init_ui() {
     QWidget* central = qobject_cast<QWidget*>(centralWidget());
@@ -53,13 +122,7 @@ void OrderWindow::init_ui() {
     m_shop_label = new QLabel(u" [가게명]"_s);
     QFont shop_font(u"Arial"_s, 18, QFont::Bold);
     m_shop_label->setFont(shop_font);
-    
-    m_connection_indicator = new QLabel(u" 연결 중..."_s);
-    QFont indicator_font(u"Arial"_s, 10);
-    m_connection_indicator->setFont(indicator_font);
-    m_connection_indicator->setStyleSheet(u"color: #FF6B6B;"_s);
-    m_connection_indicator->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-    
+
     header_layout->addWidget(m_shop_label);
     header_layout->addStretch();
     header_layout->addWidget(m_connection_indicator);
@@ -112,6 +175,8 @@ void OrderWindow::init_ui() {
     
     main_layout->addStretch();
 }
+
+// ==================== 섹션 설정 ====================
 
 void OrderWindow::setup_menu_section() {
     QWidget* central = qobject_cast<QWidget*>(centralWidget());
@@ -271,6 +336,8 @@ void OrderWindow::setup_status_section() {
     main_layout->addWidget(m_status_label);
 }
 
+// ==================== 신호 연결 ====================
+
 void OrderWindow::create_connections() {
     // MQTT 신호 연결
     connect(m_mqtt_client.get(), &MQTTClient::shop_loaded,
@@ -286,6 +353,8 @@ void OrderWindow::create_connections() {
     connect(m_mqtt_client.get(), &MQTTClient::error_occurred,
             this, &OrderWindow::on_mqtt_error);
 }
+
+// ==================== 슬롯 함수 ====================
 
 void OrderWindow::on_menu_checkbox_toggled(const QString& menu_name, bool checked) {
     if (checked) {
@@ -331,33 +400,42 @@ void OrderWindow::on_reset_button_clicked() {
     update_status_message(u"초기화되었습니다"_s);
 }
 
+// ==================== 주문 검증 및 제출 ====================
+
 void OrderWindow::validate_and_submit_order() {
+    // 메뉴 선택 확인
     if (m_selected_menus.isEmpty()) {
         update_status_message(u"❌ 메뉴를 선택하세요!"_s, u"#D32F2F"_s);
+        qDebug() << "✗ 메뉴 미선택";
         return;
     }
     
+    // 목적지 선택 확인
     if (m_selected_destination == -1) {
         update_status_message(u"❌ 목적지를 선택하세요!"_s, u"#D32F2F"_s);
+        qDebug() << "✗ 목적지 미선택";
         return;
     }
     
+    // PIN 입력 확인
     QString pin = m_pin_input->text();
     if (pin.isEmpty()) {
         update_status_message(u"❌ PIN을 입력하세요!"_s, u"#D32F2F"_s);
+        qDebug() << "✗ PIN 미입력";
         return;
     }
     
+    // PIN 형식 확인 (4자리 숫자)
     if (pin.length() != 4 || !pin.at(0).isDigit()) {
         update_status_message(u"❌ PIN은 4자리 숫자여야 합니다!"_s, u"#D32F2F"_s);
+        qDebug() << "✗ PIN 형식 오류:" << pin;
         return;
     }
     
+    // 주문 ID 생성 (ORD001, ORD002, ...)
     m_last_order_id = QString(u"ORD%1"_s).arg(m_order_counter, 3, 10, QChar('0'));
-    m_mqtt_client->publish_order(m_last_order_id, m_selected_menus, m_selected_destination, pin);
     
-    m_order_counter++;
-    
+    // ✅ UI 먼저 업데이트 (즉시 표시)
     m_order_info_label->setText(
         QString(u"주문 번호: <b>%1</b> | 주문 상태: 처리 중..."_s).arg(m_last_order_id)
     );
@@ -368,25 +446,59 @@ void OrderWindow::validate_and_submit_order() {
         u"#388E3C"_s
     );
     
+    qDebug() << "✓ 주문 제출됨:" << m_last_order_id;
+    qDebug() << "  메뉴:" << m_selected_menus;
+    qDebug() << "  목적지:" << m_selected_destination;
+    qDebug() << "  PIN:" << "****" << "(숨김)";
+    
+    m_order_counter++;
+    
+    // ✅ MQTT 발행을 별도 스레드에서 실행 (메인 스레드 블로킹 방지)
+    std::thread publish_thread([this]() {
+        try {
+            qDebug() << "📡 별도 스레드에서 주문 발행 중...";
+            m_mqtt_client->publish_order(
+                m_last_order_id,
+                m_selected_menus,
+                m_selected_destination,
+                m_pin_input->text()
+            );
+            qDebug() << "✓ 주문 발행 완료";
+        } catch (const std::exception& e) {
+            qCritical() << "✗ 주문 발행 실패:" << e.what();
+        }
+    });
+    publish_thread.detach();  // 백그라운드에서 실행
+    
+    // ✅ 폼 초기화 (MQTT 발행과 동시에 진행)
     reset_form();
 }
 
+// ==================== 폼 초기화 ====================
+
 void OrderWindow::reset_form() {
+    // 메뉴 체크박스 해제
     for (auto [menu_name, checkbox] : m_menu_checkboxes.asKeyValueRange()) {
         checkbox->setChecked(false);
     }
     
+    // 목적지 버튼 스타일 리셋
     for (auto [num, btn] : m_destination_buttons.asKeyValueRange()) {
         btn->setStyleSheet(
             u"background-color: #F5F5F5; border-radius: 8px; border: 1px solid #E0E0E0;"_s
         );
     }
     
+    // 입력 필드 초기화
     m_pin_input->clear();
     m_selected_menus.clear();
     m_selected_destination = -1;
     m_selected_destination_label->setText(u"목적지를 선택하세요"_s);
+    
+    qDebug() << "✓ 폼 초기화 완료";
 }
+
+// ==================== 상태 메시지 ====================
 
 void OrderWindow::update_status_message(const QString& message, const QString& color) {
     m_status_label->setText(message);
@@ -394,14 +506,18 @@ void OrderWindow::update_status_message(const QString& message, const QString& c
     qDebug() << message;
 }
 
+// ==================== MQTT 이벤트 핸들러 ====================
+
 void OrderWindow::on_shop_loaded(const QJsonObject& shop_data) {
     QString shop_name = shop_data[u"shop_name"_s].toString(u"우리 가게"_s);
     m_shop_label->setText(QString(u" %1"_s).arg(shop_name));
     
     update_status_message(u"✓ 가게 정보 로드 완료"_s, u"#388E3C"_s);
+    qDebug() << "✓ 가게 정보 로드됨:" << shop_name;
 }
 
 void OrderWindow::on_order_started(const QString& order_id) {
+    // 해당 주문의 상태 업데이트만 수행
     if (order_id == m_last_order_id) {
         update_status_message(
             QString(u" [%1] 배달 시작됨!"_s).arg(order_id),
@@ -411,6 +527,10 @@ void OrderWindow::on_order_started(const QString& order_id) {
             QString(u"주문 번호: <b>%1</b> | 주문 상태: 배달 중..."_s).arg(order_id)
         );
         m_order_info_label->setStyleSheet(u"color: #F57C00;"_s);
+        
+        qDebug() << "✓ 배송 시작됨:" << order_id;
+    } else {
+        qDebug() << "ℹ️ 다른 주문의 배송 시작:" << order_id << "(현재 주문:" << m_last_order_id << ")";
     }
 }
 
@@ -424,6 +544,8 @@ void OrderWindow::on_order_arrived(const QString& order_id) {
             QString(u"주문 번호: <b>%1</b> | 주문 상태: 목적지 도착"_s).arg(order_id)
         );
         m_order_info_label->setStyleSheet(u"color: #1976D2;"_s);
+        
+        qDebug() << "✓ 목적지 도착:" << order_id;
     }
 }
 
@@ -437,6 +559,8 @@ void OrderWindow::on_order_completed(const QString& order_id) {
             QString(u"주문 번호: <b>%1</b> | 주문 상태: 완료"_s).arg(order_id)
         );
         m_order_info_label->setStyleSheet(u"color: #388E3C;"_s);
+        
+        qDebug() << "✓ 배달 완료:" << order_id;
     }
 }
 
@@ -444,17 +568,23 @@ void OrderWindow::on_connection_changed(bool connected) {
     if (connected) {
         m_connection_indicator->setText(u" 연결됨"_s);
         m_connection_indicator->setStyleSheet(u"color: #4CAF50;"_s);
+        qDebug() << "✓ MQTT 연결됨";
     } else {
         m_connection_indicator->setText(u" 연결 끊김"_s);
         m_connection_indicator->setStyleSheet(u"color: #D32F2F;"_s);
+        qDebug() << "✗ MQTT 연결 끊김";
     }
 }
 
 void OrderWindow::on_mqtt_error(const QString& error_message) {
     update_status_message(QString(u"⚠️ 오류: %1"_s).arg(error_message), u"#D32F2F"_s);
+    qCritical() << "✗ MQTT 오류:" << error_message;
 }
 
+// ==================== 윈도우 이벤트 ====================
+
 void OrderWindow::closeEvent(QCloseEvent* event) {
+    qDebug() << "⏹️  애플리케이션 종료 중...";
     m_mqtt_client->disconnect();
     QMainWindow::closeEvent(event);
 }
@@ -462,6 +592,7 @@ void OrderWindow::closeEvent(QCloseEvent* event) {
 void OrderWindow::changeEvent(QEvent* event) {
     if (event->type() == QEvent::LanguageChange) {
         // Qt6: 언어 변경 처리
+        qDebug() << "ℹ️ 언어 변경됨";
     }
     QMainWindow::changeEvent(event);
 }

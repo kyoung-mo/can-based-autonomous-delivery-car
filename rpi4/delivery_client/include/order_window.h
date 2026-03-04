@@ -13,7 +13,7 @@
 /**
  * @class OrderWindow
  * @brief RPi4 배달 주문 인터페이스 (Qt6)
- * 
+ *
  * 메뉴 선택, 목적지 선택, PIN 입력, 주문 제출 기능 제공
  * MQTT를 통해 배달 상태 추적
  */
@@ -65,18 +65,18 @@ private:
     // UI 컴포넌트 - 메뉴
     QMap<QString, QCheckBox*> m_menu_checkboxes;
     QMap<QString, int> m_menu_prices;
-    
+
     // UI 컴포넌트 - 목적지
     QMap<int, QPushButton*> m_destination_buttons;
     QLabel* m_selected_destination_label = nullptr;
-    
+
     // UI 컴포넌트 - PIN
     QLineEdit* m_pin_input = nullptr;
-    
+
     // UI 컴포넌트 - 버튼
     QPushButton* m_order_button = nullptr;
     QPushButton* m_reset_button = nullptr;
-    
+
     // UI 컴포넌트 - 상태
     QLabel* m_status_label = nullptr;
     QLabel* m_order_info_label = nullptr;
@@ -92,3 +92,4 @@ private:
 };
 
 #endif // ORDER_WINDOW_H
+
