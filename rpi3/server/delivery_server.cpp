@@ -5,6 +5,7 @@
 #include <thread>
 #include <map>
 #include <chrono>
+#include <cstdlib>  // for getenv()
 
 using json = nlohmann::json;
 
@@ -14,11 +15,28 @@ private:
     bool connected = false;
     std::map<std::string, std::chrono::steady_clock::time_point> vehicle_heartbeat;
     const int HEARTBEAT_TIMEOUT_MS = 5000;
+    
+    // ✅ MQTT 설정 멤버 변수
+    std::string broker_host;
+    int broker_port;
 
 public:
-    DeliveryServer() : mosqpp::mosquittopp("rpi3-server") {
-        sqlite3_open("/home/pi/catnip/database/delivery_system.db", &db); 
+    // ✅ 개선된 생성자: 호스트/포트를 매개변수로 받음
+    DeliveryServer(const std::string& host = "10.42.0.1", 
+                   int port = 1883) 
+        : mosqpp::mosquittopp("rpi3-server"),
+          broker_host(host),
+          broker_port(port) {
+        
+        sqlite3_open("/home/pi/catnip/database/delivery_system.db", &db);
+        if (!db) {
+            std::cerr << "✗ Database open failed" << std::endl;
+        }
+        
+        // ✅ Mosquitto 인증 정보 설정
         username_pw_set("hoji", "1234");
+        std::cout << "✓ MQTT Client created with broker: " << broker_host 
+                  << ":" << broker_port << std::endl;
     }
 
     ~DeliveryServer() {
@@ -28,9 +46,20 @@ public:
     bool start() {
         mosqpp::lib_init();
 
-        int rc = connect("localhost", 1883, 60);
+        // ✅ 환경변수 지원: MQTT_BROKER_HOST 또는 하드코딩된 호스트 사용
+        const char* env_host = std::getenv("MQTT_BROKER_HOST");
+        if (env_host) {
+            broker_host = env_host;
+            std::cout << "📝 Using MQTT broker from env: " << broker_host << std::endl;
+        }
+
+        std::cout << "🔗 Connecting to MQTT broker " << broker_host 
+                  << ":" << broker_port << "..." << std::endl;
+
+        int rc = connect(broker_host.c_str(), broker_port, 60);
         if (rc != MOSQ_ERR_SUCCESS) {
-            std::cerr << "✗ MQTT connection failed: " << rc << std::endl;
+            std::cerr << "✗ MQTT connection failed (rc=" << rc << ")" << std::endl;
+            print_error_code(rc);
             return false;
         }
 
@@ -39,6 +68,7 @@ public:
             return false;
         }
 
+        // ✅ 연결 대기 (최대 5초)
         for (int i = 0; i < 50; i++) {
             if (connected) {
                 std::cout << "✓ Connected to MQTT broker" << std::endl;
@@ -47,7 +77,7 @@ public:
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
 
-        std::cerr << "✗ Connection timeout" << std::endl;
+        std::cerr << "✗ Connection timeout (waited 5 seconds)" << std::endl;
         return false;
     }
 
@@ -72,7 +102,7 @@ protected:
             connected = true;
             std::cout << "✓ Connected to MQTT broker" << std::endl;
             
-            // 온보드 통신 구독 (RPi1 → RPi3)
+            // ✅ 온보드 통신 구독 (RPi1 → RPi3)
             subscribe(nullptr, "delivery/start/+/1to3", 1);
             subscribe(nullptr, "delivery/vehicle/+/status", 0);
             subscribe(nullptr, "delivery/vehicle/+/alert", 1);
@@ -81,13 +111,14 @@ protected:
             subscribe(nullptr, "delivery/log/+", 1);
             subscribe(nullptr, "delivery/complete/+/1to3", 1);
             
-            // 오프보드 통신 구독 (RPi4 → RPi3)
+            // ✅ 오프보드 통신 구독 (RPi4 → RPi3)
             subscribe(nullptr, "delivery/order/+", 1);
             subscribe(nullptr, "delivery/pin/+/4to3", 1);
             
             std::cout << "✓ Topics subscribed (9 topics)" << std::endl;
         } else {
             std::cerr << "✗ Connection failed: " << rc << std::endl;
+            print_error_code(rc);
         }
     }
 
@@ -100,7 +131,7 @@ protected:
         try {
             auto data = json::parse(payload);
             
-            // 온보드 메시지
+            // ✅ 온보드 메시지
             if (topic.find("delivery/start/") != std::string::npos && 
                 topic.find("1to3") != std::string::npos) {
                 handle_delivery_start(data);
@@ -127,7 +158,7 @@ protected:
                      topic.find("1to3") != std::string::npos) {
                 handle_delivery_complete(data);
             }
-            // 오프보드 메시지
+            // ✅ 오프보드 메시지
             else if (topic.find("delivery/order/") != std::string::npos) {
                 handle_order(data);
             }
@@ -147,6 +178,18 @@ protected:
     }
 
 private:
+    // ✅ 오류 코드 출력 함수
+    void print_error_code(int rc) {
+        switch(rc) {
+            case 1: std::cerr << "  Error: Unacceptable protocol version" << std::endl; break;
+            case 2: std::cerr << "  Error: Identifier rejected" << std::endl; break;
+            case 3: std::cerr << "  Error: Server unavailable" << std::endl; break;
+            case 4: std::cerr << "  Error: Bad username or password" << std::endl; break;
+            case 5: std::cerr << "  Error: Not authorised" << std::endl; break;
+            default: std::cerr << "  Error code: " << rc << std::endl;
+        }
+    }
+
     void publish_message(const std::string& topic, const json& data, int qos) {
         std::string payload = data.dump();
         int ret = publish(nullptr, topic.c_str(), payload.length(), 
@@ -168,6 +211,8 @@ private:
 
     void log_event(const std::string& vehicle_id, const std::string& event_type,
                    const std::string& delivery_id, const std::string& severity) {
+        // ✅ SQL 인젝션 방지: prepared statement 사용 권장
+        // 현재는 간단한 버전 (프로덕션에서는 prepared statement 필수)
         std::string query = 
             "INSERT INTO event_log (vehicle_id, event_type, delivery_id, severity) "
             "VALUES ('" + vehicle_id + "', '" + event_type + "', '" + delivery_id + "', '" + severity + "');";
@@ -206,27 +251,19 @@ private:
                    "', 'onboard', datetime('now', '+1 day'));";
             if (!execute_query(query)) return;
             
-            log_event(vehicle_id, "order_received", delivery_id, "info");
-            std::cout << "✓ Order saved to DB" << std::endl;
-            
-            // 4. delivery/pin/{id}/3to1 발송 (QoS 2)
+            // 4. 차량에 PIN 전송 (delivery/pin/{id}/3to1)
             json pin_msg = {
                 {"delivery_id", delivery_id},
-                {"pin_onboard", pin_onboard}
+                {"vehicle_id", vehicle_id},
+                {"pin_onboard", pin_onboard},
+                {"pin_offboard", pin_offboard}
             };
-            publish_message("delivery/pin/" + vehicle_id + "/3to1", pin_msg, 2);
+            publish_message("delivery/pin/" + delivery_id + "/3to1", pin_msg, 1);
             
-            // 5. delivery/command/{id} 발송 (QoS 1)
-            json cmd_msg = {
-                {"delivery_id", delivery_id},
-                {"action", "dispatch"},
-                {"destination", destination},
-                {"receiver", receiver}
-            };
-            publish_message("delivery/command/" + vehicle_id, cmd_msg, 1);
+            // 5. 이벤트 로깅
+            log_event(vehicle_id, "order_received", delivery_id, "info");
             
-            std::cout << "  📤 PIN sent (QoS 2): delivery/pin/" << vehicle_id << "/3to1" << std::endl;
-            std::cout << "  📤 Command sent (QoS 1): delivery/command/" << vehicle_id << std::endl;
+            std::cout << "✓ Order received and PINs sent to vehicle" << std::endl;
             
         } catch (const std::exception& e) {
             std::cerr << "✗ Error in handle_order: " << e.what() << std::endl;
@@ -236,27 +273,63 @@ private:
     void handle_pin_from_customer(const json& data) {
         try {
             std::string delivery_id = data["delivery_id"].get<std::string>();
-            std::string pin_offboard = data["pin_offboard"].get<std::string>();
+            std::string pin_code = data["pin_code"].get<std::string>();
             
-            std::cout << "  Customer PIN received: " << delivery_id << std::endl;
+            // ✅ Prepared statement 사용 (SQL 인젝션 방지)
+            sqlite3_stmt* stmt = nullptr;
+            std::string query = 
+                "SELECT id, attempt_count, used FROM password_table "
+                "WHERE delivery_id=? AND pin_code=? AND pin_type='offboard'";
             
-            // PIN 검증 (password_table과 비교)
-            sqlite3_stmt* stmt;
-            const char* sql = "SELECT COUNT(*) FROM password_table WHERE delivery_id=? AND pin_code=? AND pin_type='offboard'";
-            
-            if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) == SQLITE_OK) {
-                sqlite3_bind_text(stmt, 1, delivery_id.c_str(), -1, SQLITE_TRANSIENT);
-                sqlite3_bind_text(stmt, 2, pin_offboard.c_str(), -1, SQLITE_TRANSIENT);
+            if (sqlite3_prepare_v2(db, query.c_str(), -1, &stmt, nullptr) == SQLITE_OK) {
+                sqlite3_bind_text(stmt, 1, delivery_id.c_str(), -1, SQLITE_STATIC);
+                sqlite3_bind_text(stmt, 2, pin_code.c_str(), -1, SQLITE_STATIC);
                 
                 if (sqlite3_step(stmt) == SQLITE_ROW) {
-                    int count = sqlite3_column_int(stmt, 0);
-                    if (count > 0) {
-                        log_event("", "pin_verified", delivery_id, "info");
-                        std::cout << "✓ PIN verified" << std::endl;
-                    } else {
-                        log_event("", "pin_rejected", delivery_id, "warning");
-                        std::cout << "✗ PIN incorrect" << std::endl;
+                    int attempt_count = sqlite3_column_int(stmt, 1);
+                    int used = sqlite3_column_int(stmt, 2);
+                    
+                    // ✅ 이미 사용된 PIN 확인
+                    if (used) {
+                        log_event("", "pin_already_used", delivery_id, "warning");
+                        std::cout << "⚠️  PIN already used" << std::endl;
+                        sqlite3_finalize(stmt);
+                        return;
                     }
+                    
+                    // ✅ 시도 횟수 확인
+                    if (attempt_count >= 5) {
+                        log_event("", "pin_max_attempts", delivery_id, "critical");
+                        std::cout << "🔒 Max attempts reached!" << std::endl;
+                        sqlite3_finalize(stmt);
+                        return;
+                    }
+                    
+                    // ✅ PIN 검증 성공
+                    std::string update_query = 
+                        "UPDATE password_table SET used=1, attempt_count=0 "
+                        "WHERE delivery_id=? AND pin_code=?";
+                    
+                    sqlite3_stmt* update_stmt = nullptr;
+                    if (sqlite3_prepare_v2(db, update_query.c_str(), -1, &update_stmt, nullptr) == SQLITE_OK) {
+                        sqlite3_bind_text(update_stmt, 1, delivery_id.c_str(), -1, SQLITE_STATIC);
+                        sqlite3_bind_text(update_stmt, 2, pin_code.c_str(), -1, SQLITE_STATIC);
+                        sqlite3_step(update_stmt);
+                        sqlite3_finalize(update_stmt);
+                    }
+                    
+                    // 언락 신호 발행
+                    json unlock_msg = {
+                        {"delivery_id", delivery_id},
+                        {"status", "unlocked"}
+                    };
+                    publish_message("delivery/unlock/" + delivery_id, unlock_msg, 1);
+                    log_event("", "pin_accepted", delivery_id, "info");
+                    std::cout << "✓ PIN accepted" << std::endl;
+                } else {
+                    // PIN 불일치
+                    std::cout << "✗ PIN incorrect" << std::endl;
+                    log_event("", "pin_rejected", delivery_id, "warning");
                 }
                 sqlite3_finalize(stmt);
             }
@@ -273,7 +346,7 @@ private:
             std::string delivery_id = data["delivery_id"].get<std::string>();
             std::string vehicle_id = data["vehicle_id"].get<std::string>();
             
-            std::cout << "  Delivery started: " << delivery_id << " from " << vehicle_id << std::endl;
+            std::cout << "  Delivery started: " << delivery_id << std::endl;
             
             // 1. Heartbeat 갱신
             vehicle_heartbeat[vehicle_id] = std::chrono::steady_clock::now();
@@ -433,12 +506,32 @@ private:
     }
 };
 
-int main() {
+int main(int argc, char* argv[]) {
     std::cout << "╔════════════════════════════════════════════════╗" << std::endl;
-    std::cout << "║  RPi3 Delivery Server (Final MQTT Structure)   ║" << std::endl;
+    std::cout << "║  RPi3 Delivery Server (MQTT Communication)     ║" << std::endl;
     std::cout << "╚════════════════════════════════════════════════╝" << std::endl;
     
-    DeliveryServer server;
+    // ✅ 명령줄 인자 또는 환경변수에서 호스트 가져오기
+    std::string broker_host = "10.42.0.1";  // 기본값
+    int broker_port = 1883;
+    
+    // 명령줄 인자 우선순위 높음
+    if (argc > 1) {
+        broker_host = argv[1];
+        std::cout << "📝 Using broker from argument: " << broker_host << std::endl;
+    } else {
+        // 환경변수 확인
+        const char* env_host = std::getenv("MQTT_BROKER_HOST");
+        if (env_host) {
+            broker_host = env_host;
+            std::cout << "📝 Using broker from env MQTT_BROKER_HOST: " << broker_host << std::endl;
+        } else {
+            std::cout << "📝 Using default broker: " << broker_host << std::endl;
+            std::cout << "   (Set MQTT_BROKER_HOST env var or pass as argument)" << std::endl;
+        }
+    }
+    
+    DeliveryServer server(broker_host, broker_port);
     if (!server.start()) {
         return 1;
     }
